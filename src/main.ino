@@ -130,13 +130,12 @@ void setup()
   int i = 0;
   while (WiFi.status() != WL_CONNECTED)  {
     delay(500);
-
-      if(i<10){
-        Serial.print(".");
-      }else{
-        Serial.println(".");
-        i=0;
-      }
+    if(i<10){
+      Serial.print(".");
+    }else{
+      Serial.println("." );
+      i=0;
+    }
     i++;
   }
 
