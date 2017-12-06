@@ -1,3 +1,5 @@
+// Stair light with Wemos D1 mini
+
 #include "config.h"
 
 #if defined(MY_USE_UDP)
@@ -133,7 +135,7 @@ void setup()
     if(i<10){
       Serial.print(".");
     }else{
-      Serial.println("." ) ;
+      Serial.println("." );
       i=0;
     }
     i++;
