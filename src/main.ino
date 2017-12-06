@@ -133,7 +133,7 @@ void setup()
     if(i<10){
       Serial.print(".");
     }else{
-      Serial.println("." );
+      Serial.println("." ) ;
       i=0;
     }
     i++;
