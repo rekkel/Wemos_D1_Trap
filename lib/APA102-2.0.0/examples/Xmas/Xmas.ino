@@ -1,95 +1,52 @@
-// Stair light with Wemos D1 mini
+/* This example has a series of fun patterns for use with LED
+ * strips set up as a Christmas lighting display.  You can see an
+ * earlier version of this code running in this YouTube video:
+ * https://www.youtube.com/watch?v=VZRN0UrQSlc
+ *
+ * You can optionally connect a switch between pin 3 and ground
+ * to control if the Arduino automatically cycles through the
+ * different patterns.  When no switch is present or the switch
+ * is open, the patterns will cycle.
+ *
+ * You can also optionally connect a button between pin 2 and
+ * ground that displays the next pattern in the series each time
+ * it is pushed. */
 
-#include "config.h"
-#include <ESP8266WiFi.h>
-#include <PubSubClient.h>
+/* This example is meant for controlling large numbers of LEDs,
+ * so it requires the FastGPIO library.  If you cannot use the
+ * FastGPIO library, you can comment out the two lines below and
+ * the example will still work, but it will be slow. */
+#include <FastGPIO.h>
+#define APA102_USE_FAST_GPIO
+
 #include <APA102.h>
 #include <EEPROM.h>
-#include <ArduinoJson.h>
 
-const char* wifi_password = WIFI_PASSWORD;
-const char* wifi_ssid     = WIFI_SSID;
-
-const char* mqtt_srv = MQTT_SERVER;
-const char* mqtt_pw  = MQTT_password;
-const char* mqtt_us  = MQTT_USER;
-
-int i = 0;
-long lastReconnectAttempt = 0;
-
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-const uint8_t dataPin = D3;
-const uint8_t clockPin = D4;
-
+const uint8_t dataPin = 11;
+const uint8_t clockPin = 12;
 APA102<dataPin, clockPin> ledStrip;
-#define fDebug true
-#define LED_COUNT 52
+
+#define NEXT_PATTERN_BUTTON_PIN  2  // button between this pin and ground
+#define AUTOCYCLE_SWITCH_PIN  3  // switch between this pin and ground
+
+// Create a buffer for holding 509 colors.
+// This takes 1527 bytes and uses up most of the 2KB RAM on an Uno,
+// so we should be very sparing with additional RAM use and keep
+// an eye out for possible stack overflow problems.
+#define LED_COUNT 509
 rgb_color colors[LED_COUNT];
 
 // Set the brightness to use (the maximum is 31).
-uint8_t globalBrightness = 1;
-String temp_globalBrightness;
-char send_globalBrightness[5];
+const uint8_t globalBrightness = 1;
 
-#define NUM_STATES  13  // number of patterns to cycle through
+#define NUM_STATES  7  // number of patterns to cycle through
 
 // system timer, incremented by one every time through the main loop
 unsigned int loopCount = 0;
+
 unsigned int seed = 0;  // used to initialize random number generator
-// Global vars for stairs
-int actTrede = 1;
-const unsigned char numTredes = 14;
-int wachten = 0;
 
-const char*             CMD_ON                     = "ON";
-const char*             CMD_OFF                    = "OFF";
-
-const char*             MQTT_WWS_STATE_TOPIC       = "trap/WWS/status";
-const char*             MQTT_WWS_COMMAND_TOPIC     = "trap/WWS/switch";
-const char*             MQTT_RCK_STATE_TOPIC       = "trap/RCK/status";
-const char*             MQTT_RCK_COMMAND_TOPIC     = "trap/RCK/switch";
-const char*             MQTT_TRC_STATE_TOPIC       = "trap/TRC/status";
-const char*             MQTT_TRC_COMMAND_TOPIC     = "trap/TRC/switch";
-const char*             MQTT_CEX_STATE_TOPIC       = "trap/CEX/status";
-const char*             MQTT_CEX_COMMAND_TOPIC     = "trap/CEX/switch";
-const char*             MQTT_GRA_STATE_TOPIC       = "trap/GRA/status";
-const char*             MQTT_GRA_COMMAND_TOPIC     = "trap/GRA/switch";
-const char*             MQTT_BTW_STATE_TOPIC       = "trap/BTW/status";
-const char*             MQTT_BTW_COMMAND_TOPIC     = "trap/BTW/switch";
-const char*             MQTT_COL_STATE_TOPIC       = "trap/COL/status";
-const char*             MQTT_COL_COMMAND_TOPIC     = "trap/COL/switch";
-const char*             MQTT_TRU_STATE_TOPIC       = "trap/TRU/status";
-const char*             MQTT_TRU_COMMAND_TOPIC     = "trap/TRU/switch";
-const char*             MQTT_TRD_STATE_TOPIC       = "trap/TRD/status";
-const char*             MQTT_TRD_COMMAND_TOPIC     = "trap/TRD/switch";
-const char*             MQTT_VLG_STATE_TOPIC       = "trap/VLG/status";
-const char*             MQTT_VLG_COMMAND_TOPIC     = "trap/VLG/switch";
-const char*             MQTT_RED_STATE_TOPIC       = "trap/RED/status";
-const char*             MQTT_RED_COMMAND_TOPIC     = "trap/RED/switch";
-const char*             MQTT_GRE_STATE_TOPIC       = "trap/GRE/status";
-const char*             MQTT_GRE_COMMAND_TOPIC     = "trap/GRE/switch";
-const char*             MQTT_BLU_STATE_TOPIC       = "trap/BLU/status";
-const char*             MQTT_BLU_COMMAND_TOPIC     = "trap/BLU/switch";
-
-const char*             MQTT_BRI_STATE_TOPIC       = "trap/BRI/status";
-const char*             MQTT_BRI_COMMAND_TOPIC     = "trap/BRI/switch";
-
-boolean WWS_State = false;
-boolean RCK_State = false;
-boolean TRC_State = false;
-boolean CEX_State = false;
-boolean GRA_State = false;
-boolean BTW_State = false;
-boolean COL_State = false;
-boolean TRU_State = false;
-boolean TRD_State = false;
-boolean VLG_State = false;
-boolean RED_State = false;
-boolean GRE_State = false;
-boolean BLU_State = false;
-
+// enumerate the possible patterns in the order they will cycle
 enum Pattern {
   WarmWhiteShimmer = 0,
   RandomColorWalk = 1,
@@ -98,318 +55,20 @@ enum Pattern {
   Gradient = 4,
   BrightTwinkle = 5,
   Collision = 6,
-  TrapUp = 7,
-  TrapDown = 8,
-  Vlag = 9,
-  Red = 10,
-  Green = 11,
-  Blue = 12,
   AllOff = 255
 };
-
 unsigned char pattern = AllOff;
 unsigned int maxLoops;  // go to next state when loopCount >= maxLoops
-void pattern_State(int pattern_state ){
 
-  client.publish(MQTT_WWS_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_RCK_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_TRC_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_CEX_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_GRA_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_BTW_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_COL_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_TRU_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_TRD_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_VLG_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_RED_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_GRE_STATE_TOPIC,CMD_OFF,true);
-  client.publish(MQTT_BLU_STATE_TOPIC,CMD_OFF,true);
 
-  temp_globalBrightness = String(globalBrightness);
-  temp_globalBrightness.toCharArray(send_globalBrightness, temp_globalBrightness.length() + 1);
-  client.publish(MQTT_BRI_STATE_TOPIC,send_globalBrightness,true);
-
-  WWS_State = false;
-  RCK_State = false;
-  TRC_State = false;
-  CEX_State = false;
-  GRA_State = false;
-  BTW_State = false;
-  COL_State = false;
-  TRU_State = false;
-  TRD_State = false;
-  VLG_State = false;
-  RED_State = false;
-  GRE_State = false;
-  BLU_State = false;
-
-  switch (pattern_state)
-  {
-    case 0:
-      WWS_State = true;
-      client.publish(MQTT_WWS_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 1:
-      RCK_State = true;
-      client.publish(MQTT_RCK_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 2:
-      TRC_State = true;
-      client.publish(MQTT_TRC_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 3:
-      CEX_State = true;
-      client.publish(MQTT_CEX_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 4:
-      GRA_State = true;
-      client.publish(MQTT_GRA_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 5:
-      BTW_State = true;
-      client.publish(MQTT_BTW_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 6:
-      COL_State = true;
-      client.publish(MQTT_COL_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 7:
-      TRU_State = true;
-      client.publish(MQTT_TRU_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 8:
-      TRD_State = true;
-      client.publish(MQTT_TRD_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 9:
-      VLG_State = true;
-      client.publish(MQTT_VLG_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 10:
-      RED_State = true;
-      client.publish(MQTT_RED_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 11:
-      GRE_State = true;
-      client.publish(MQTT_GRE_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 12:
-      BLU_State = true;
-      client.publish(MQTT_BLU_STATE_TOPIC,CMD_ON,true);
-      break;
-    case 255:
-      break;
-  }
-  wachten = 0;
-}
-
-// function called when a MQTT message arrived
-void callback(char* p_topic, byte* p_payload, unsigned int p_length) {
-  // concat the payload into a string
-  if (fDebug){  Serial.println("Callback...");  }
-
-  String payload;
-  for (uint8_t i = 0; i < p_length; i++) {
-    payload.concat((char)p_payload[i]);
-  }
-  if (fDebug){ Serial.print("Payload: "); Serial.println(payload);  }
-  if (payload.equals(String(CMD_OFF))) {
-    wachten = 0;
-  }
-
-  // handle message topic
-  if (String(MQTT_WWS_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (WWS_State != true) {
-        //WWS_State = true;
-        pattern = 0;
-        pattern_State(pattern);
-        //Logs("WarmWhSh ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        WWS_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("WarmWhSh OFF");
-    }
-  } else if (String(MQTT_RCK_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (RCK_State != true) {
-        //RCK_State = true;
-        pattern = 1;
-        //Logs("RndmClr ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        RCK_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("RndmClr OFF");
-    }
-  } else if (String(MQTT_TRC_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (TRC_State != true) {
-        //TRC_State = true;
-        pattern = 2;
-        //Logs("TraditClrs ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        TRC_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("TraditClrs OFF");
-    }
-  } else if (String(MQTT_CEX_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (CEX_State != true) {
-        //CEX_State = true;
-        pattern = 3;
-        //Logs("ColorExpl ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        CEX_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("ColorExpl OFF");
-    }
-  } else if (String(MQTT_GRA_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (GRA_State != true) {
-        //GRA_State = true;
-        pattern = 4;
-        //Logs("Gradient ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        GRA_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("Gradient OFF");
-    }
-  } else if (String(MQTT_BTW_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (BTW_State != true) {
-        //BTW_State = true;
-        pattern = 5;
-        //Logs("BrightTw ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        BTW_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("BrightTw OFF");
-    }
-  } else if (String(MQTT_COL_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (COL_State != true) {
-        //COL_State = true;
-        pattern = 6;
-        loopCount = 0;
-        //Logs("Collision ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        COL_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("Collision OFF");
-    }
-  } else if (String(MQTT_TRU_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (TRU_State != true) {
-        //TRU_State = true;
-        pattern = 7;
-        loopCount = 0;
-        //Logs("TrapUp ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        TRU_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("TrapUp OFF");
-    }
-  } else if (String(MQTT_TRD_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (TRD_State != true) {
-        //TRD_State = true;
-        pattern = 8;
-        loopCount = 0;
-        //if (fDebug){ Serial.println(pattern); }
-        //Logs("TrapDown ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        TRD_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("TrapDown OFF");
-    }
-  } else if (String(MQTT_VLG_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (VLG_State != true) {
-        //VLG_State = true;
-        pattern = 9;
-        //Logs("Vlag ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        VLG_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("Vlag OFF");
-    }
-  } else if (String(MQTT_RED_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (RED_State != true) {
-        //RED_State = true;
-        pattern = 10;
-        //Logs("Red ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        RED_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("Red OFF");
-    }
-  } else if (String(MQTT_GRE_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (GRE_State != true) {
-        //GRE_State = true;
-        pattern = 11;
-        //Logs("Green ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        GRE_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("Green OFF");
-    }
-  } else if (String(MQTT_BLU_COMMAND_TOPIC).equals(p_topic)) {
-    if (payload.equals(String(CMD_ON))) {
-      if (BLU_State != true) {
-        //BLU_State = true;
-        pattern = 12;
-        //Logs("Blue ON");
-      }
-    } else if (payload.equals(String(CMD_OFF))) {
-        BLU_State = false;
-        pattern = 255;
-        loopCount = 0;
-        //Logs("Blue OFF");
-    }
-  }else if (String(MQTT_BRI_COMMAND_TOPIC).equals(p_topic)) {
-      globalBrightness = payload.toInt() ;
-  }
-  pattern_State(pattern);
-}
-
+// initialization stuff
 void setup()
 {
-  Serial.begin(115200);
-  Serial.println();
-
-  setup_wifi();
-  client.setServer(mqtt_srv, 1883);
-  client.setCallback(callback);
-
-  for (int i = 0; i < 2; i++)
+  // initialize the random number generator with a seed obtained by
+  // summing the voltages on the disconnected analog inputs
+  for (int i = 0; i < 8; i++)
   {
-      seed += analogRead(i);
+    seed += analogRead(i);
   }
   seed += EEPROM.read(0);  // get part of the seed from EEPROM
   randomSeed(seed);
@@ -417,108 +76,24 @@ void setup()
   // generation the next time the program runs
   EEPROM.write(0, random(256));
 
-  lastReconnectAttempt = 0;
+  // optionally connect a switch between this pin and ground
+  // when the input is low, freeze the cycle at the current pattern
+  pinMode(AUTOCYCLE_SWITCH_PIN, INPUT_PULLUP);
+
+  // optionally connect a button between this pin and ground
+  // when the input goes low, advance to the next pattern in cycle
+  pinMode(NEXT_PATTERN_BUTTON_PIN, INPUT_PULLUP);
+
   delay(10);  // give pull-ups time raise the input voltage
-
 }
 
-void setup_wifi() {
-  delay(10);
-  // We start by connecting to a WiFi network
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(wifi_ssid);
 
-  WiFi.begin(wifi_ssid, wifi_password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    if(i<10){
-      Serial.print(".");
-    }else{
-      Serial.println("." );
-      i=0;
-    }
-    i++;
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-}
-
-boolean reconnect() {
-
-    if (client.connect("ESP8266Client", mqtt_us, mqtt_pw)) {
-      Serial.println("connected");
-      client.subscribe(MQTT_WWS_COMMAND_TOPIC );
-      //client.subscribe(MQTT_RCK_COMMAND_TOPIC );
-      //client.subscribe(MQTT_TRC_COMMAND_TOPIC );
-      //client.subscribe(MQTT_CEX_COMMAND_TOPIC );
-      //client.subscribe(MQTT_GRA_COMMAND_TOPIC );
-      //client.subscribe(MQTT_BTW_COMMAND_TOPIC );
-      //client.subscribe(MQTT_COL_COMMAND_TOPIC );
-      //client.subscribe(MQTT_TRU_COMMAND_TOPIC );
-      //client.subscribe(MQTT_TRD_COMMAND_TOPIC );
-      //client.subscribe(MQTT_VLG_COMMAND_TOPIC );
-      //client.subscribe(MQTT_RED_COMMAND_TOPIC );
-      //client.subscribe(MQTT_GRE_COMMAND_TOPIC );
-      //client.subscribe(MQTT_BLU_COMMAND_TOPIC );
-      //client.subscribe(MQTT_BRI_COMMAND_TOPIC );
-      Serial.println("subscribe");
-      pattern_State(255);
-      StaticJsonBuffer<300> JSONbuffer;
-      JsonObject& JSONencoder = JSONbuffer.createObject();
-      JSONencoder["device"] = "ESP32Trap";
-      JSONencoder["sensorType"] = "APA102";
-      JsonArray& values = JSONencoder.createNestedArray("values");
-      values.add(2);
-      values.add(1);
-      values.add(0);
-      values.add(0);
-      values.add(0);
-      values.add(0);
-      char JSONmessageBuffer[200];
-      JSONencoder.printTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
-      Serial.println("Sending message to MQTT topic..");
-        Serial.println(JSONmessageBuffer);
-
-        if (client.publish("trap/test", JSONmessageBuffer) == true) {
-          Serial.println("Success sending message");
-        } else {
-          Serial.println("Error sending message");
-        }
-
-
-    }
-    return client.connected();
-}
-
+// main loop
 void loop()
 {
-  if (!client.connected()) {
-    long now = millis();
-    if (now - lastReconnectAttempt > 5000) {
-      lastReconnectAttempt = now;
-      // Attempt to reconnect
-      if (reconnect()) {
-        lastReconnectAttempt = 0;
-      }
-    }
-  } else {
-    // Client connected
-
-    client.loop();
-  }
-
   uint8_t startTime = millis();
 
-  if (pattern == 255){
-    loopCount = 0;
-    TRU_State = LOW;
-    TRD_State = LOW;
-  }
+  handleNextPatternButton();
 
   if (loopCount == 0)
   {
@@ -531,6 +106,9 @@ void loop()
 
   if (pattern == WarmWhiteShimmer || pattern == RandomColorWalk)
   {
+    // for these two patterns, we want to make sure we get the same
+    // random sequence six times in a row (this provides smoother
+    // random fluctuations in brightness/color)
     if (loopCount % 6 == 0)
     {
       seed = random(30000);
@@ -538,61 +116,54 @@ void loop()
     randomSeed(seed);
   }
 
+  // call the appropriate pattern routine based on state; these
+  // routines just set the colors in the colors array
   switch (pattern)
   {
     case WarmWhiteShimmer:
       // warm white shimmer for 300 loopCounts, fading over last 70
       maxLoops = 300;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-      //warmWhiteShimmer(loopCount > maxLoops - 70);
-      warmWhiteShimmer(loopCount > maxLoops);
+      warmWhiteShimmer(loopCount > maxLoops - 70);
       break;
 
     case RandomColorWalk:
+      // start with alternating red and green colors that randomly walk
+      // to other colors for 400 loopCounts, fading over last 80
       maxLoops = 400;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-
       randomColorWalk(loopCount == 0 ? 1 : 0, loopCount > maxLoops - 80);
       break;
 
     case TraditionalColors:
+      // repeating pattern of red, green, orange, blue, magenta that
+      // slowly moves for 400 loopCounts
       maxLoops = 400;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-
       traditionalColors();
       break;
 
     case ColorExplosion:
+      // bursts of random color that radiate outwards from random points
+      // for 630 loop counts; no burst generation for the last 70 counts
+      // of every 200 count cycle or over the over final 100 counts
+      // (this creates a repeating bloom/decay effect)
       maxLoops = 630;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-
       colorExplosion((loopCount % 200 > 130) || (loopCount > maxLoops - 100));
       break;
 
     case Gradient:
+      // red -> white -> green -> white -> red ... gradiant that scrolls
+      // across the strips for 250 counts; this pattern is overlaid with
+      // waves of dimness that also scroll (at twice the speed)
       maxLoops = 250;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-
       gradient();
       delay(6);  // add an extra 6ms delay to slow things down
       break;
 
     case BrightTwinkle:
+      // random LEDs light up brightly and fade away; it is a very similar
+      // algorithm to colorExplosion (just no radiating outward from the
+      // LEDs that light up); as time goes on, allow progressively more
+      // colors, halting generation of new twinkles for last 100 counts.
       maxLoops = 1200;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-
       if (loopCount < 400)
       {
         brightTwinkle(0, 1, 0);  // only white for first 400 loopCounts
@@ -613,68 +184,67 @@ void loop()
       break;
 
     case Collision:
+      // colors grow towards each other from the two ends of the strips,
+      // accelerating until they collide and the whole strip flashes
+      // white and fades; this repeats until the function indicates it
+      // is done by returning 1, at which point we stop keeping maxLoops
+      // just ahead of loopCount
       if (!collision())
       {
         maxLoops = loopCount + 2;
       }
-      break;
-    case TrapUp:
-      maxLoops = ((numTredes * 15) * 2) + 600; // 15 cycles between steps  2 times for "ON" and "OFF" and plus count cycles for "ON"
-      if (!trapup())
-      {
-        maxLoops = loopCount + 2;
-      }
-      break;
-    case TrapDown:
-      maxLoops = ((numTredes * 15) * 2) + 600; // 15 cycles between steps  2 times for "ON" and "OFF" and plus count cycles for "ON"
-      if (!trapdown())
-      {
-        //Serial.println(loopCount);
-        maxLoops = loopCount + 2;
-
-      }
-      break;
-    case Vlag:
-      maxLoops = 100;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-      vlag();
-      break;
-    case Red:
-      maxLoops = 10;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-      rood();
-      break;
-    case Green:
-      maxLoops = 10;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-      groen();
-      break;
-    case Blue:
-      maxLoops = 10;
-      if (loopCount == maxLoops){
-        loopCount = 0;
-      }
-      blauw();
       break;
   }
 
   // update the LED strips with the colors in the colors array
   ledStrip.write(colors, LED_COUNT, globalBrightness);
 
+  // Make sure that loops are not too fast there are a small number
+  // of LEDs and the colors are calculated quickly.
   while((uint8_t)(millis() - startTime) < 20) { }
   loopCount++;  // increment our loop counter/timer.
 
-  if (loopCount >= maxLoops )//&& digitalRead(AUTOCYCLE_SWITCH_PIN))
+  if (loopCount >= maxLoops && digitalRead(AUTOCYCLE_SWITCH_PIN))
   {
+    // if the time is up for the current pattern and the optional hold
+    // switch is not grounding the AUTOCYCLE_SWITCH_PIN, clear the
+    // loop counter and advance to the next pattern in the cycle
     loopCount = 0;  // reset timer
+    pattern = ((unsigned char)(pattern+1))%NUM_STATES;  // advance to next pattern
   }
 }
+
+
+// This function detects if the optional next pattern button is pressed
+// (connecting the pin to ground) and advances to the next pattern
+// in the cycle if so.  It also debounces the button.
+void handleNextPatternButton()
+{
+  if (digitalRead(NEXT_PATTERN_BUTTON_PIN) == 0)
+  {
+    // if optional button is pressed
+    while (digitalRead(NEXT_PATTERN_BUTTON_PIN) == 0)
+    {
+      // wait for button to be released
+      while (digitalRead(NEXT_PATTERN_BUTTON_PIN) == 0);
+      delay(10);  // debounce the button
+    }
+    loopCount = 0;  // reset timer
+    pattern = ((unsigned char)(pattern+1))%NUM_STATES;  // advance to next pattern
+  }
+}
+
+
+// This function applies a random walk to val by increasing or
+// decreasing it by changeAmount or by leaving it unchanged.
+// val is a pointer to the byte to be randomly changed.
+// The new value of val will always be within [0, maxVal].
+// A walk direction of 0 decreases val and a walk direction of 1
+// increases val.  The directions argument specifies the number of
+// possible walk directions to choose from, so when directions is 1, val
+// will always decrease; when directions is 2, val will have a 50% chance
+// of increasing and a 50% chance of decreasing; when directions is 3,
+// val has an equal chance of increasing, decreasing, or staying the same.
 void randomWalk(unsigned char *val, unsigned char maxVal, unsigned char changeAmount, unsigned char directions)
 {
   unsigned char walk = random(directions);  // direction of random walk
@@ -702,7 +272,6 @@ void randomWalk(unsigned char *val, unsigned char maxVal, unsigned char changeAm
       *val = maxVal;
     }
   }
-  //delay(6);
 }
 
 
@@ -1380,141 +949,4 @@ unsigned char collision()
   }
 
   return 0;
-}
-
-unsigned char trapup()
-{
-
-  const unsigned char maxBrightness = 255;  // max brightness for the colors
-  const unsigned char numLEDS = 4;  // # of collisions before pattern ends
-
-  if( loopCount != 0 ){
-    if( loopCount == 1){
-      actTrede = 1;
-    }
-
-
-    if (loopCount % 15 == 0 && loopCount < 210 )
-    {
-      for (int i = 0; i < numLEDS * actTrede ; i++)
-      {
-        colors[i] = rgb_color(maxBrightness, maxBrightness, maxBrightness);
-      }
-      actTrede++;
-    }
-
-    if( loopCount == 800){
-      actTrede = 1;
-    }
-
-    if (loopCount % 15 == 0 && loopCount > 810 )
-    {
-      for (int i = 0; i < numLEDS * actTrede ; i++)
-      {
-        colors[i] = rgb_color(0, 0, 0);
-      }
-      actTrede++;
-    }
-
-    if( actTrede == numTredes){
-      actTrede = 1;
-    }
-
-    if (loopCount == 1020){
-      return 1;
-    }
-  }
-  return 0;
-}
-
-unsigned char trapdown()
-{
-
-  const unsigned char maxBrightness = 255;  // max brightness for the colors
-  const unsigned char numLEDS = 4;  // # of collisions before pattern ends
-
-  if( loopCount != 0 ){
-    if( loopCount == 1 ){
-      actTrede = 13;
-      if (fDebug){ Serial.print("actTrede ");}
-      if (fDebug){ Serial.println(actTrede);}
-    }
-
-    if (loopCount % 15 == 0 && loopCount < 210 )
-    {
-      for (int i = numLEDS * actTrede ; --i >= (numLEDS * (actTrede -1)) ;)
-      {
-        //Serial.println(i);
-        colors[i] = rgb_color(maxBrightness, maxBrightness, maxBrightness);
-      }
-      actTrede--;
-    }
-
-
-    if( loopCount == 800){
-      actTrede = 13;
-    }
-
-    if (loopCount % 15 == 0 && loopCount > 810 )
-    {
-      for (int i = numLEDS * actTrede ; --i >= (numLEDS * (actTrede -1 )) ;)
-      {
-        colors[i] = rgb_color(0, 0, 0);
-      }
-      actTrede--;
-    }
-    if (loopCount == 1020){
-      return 1;
-    }
-  }
-return 0;
-}
-
-void vlag()
-{
-    const unsigned char maxBrightness = 255;  // max brightness for the colors
-    const unsigned char numLEDS = 4;  // # of collisions before pattern ends
-
-      for (int i = 0; i < numLEDS * 5 ; i++)
-      {
-        colors[i] = rgb_color(maxBrightness, 0, 0);
-      }
-      for (int i = numLEDS * 5; i < numLEDS * 9 ; i++)
-      {
-        colors[i] = rgb_color(maxBrightness, maxBrightness, maxBrightness);
-      }
-      for (int i = numLEDS * 9; i < numLEDS * 13 ; i++)
-      {
-        colors[i] = rgb_color(0, 0, maxBrightness);
-      }
-}
-
-void rood()
-{
-    const unsigned char maxBrightness = 255;  // max brightness for the colors
-    const unsigned char numLEDS = 4;  // # of collisions before pattern ends
-      for (int i = 0; i < numLEDS * 13 ; i++)
-      {
-        colors[i] = rgb_color(maxBrightness, 0, 0);
-      }
-}
-
-void groen()
-{
-    const unsigned char maxBrightness = 255;  // max brightness for the colors
-    const unsigned char numLEDS = 4;  // # of collisions before pattern ends
-      for (int i = 0; i < numLEDS * 13 ; i++)
-      {
-        colors[i] = rgb_color(0, maxBrightness, 0);
-      }
-}
-
-void blauw()
-{
-    const unsigned char maxBrightness = 255;  // max brightness for the colors
-    const unsigned char numLEDS = 4;  // # of collisions before pattern ends
-      for (int i = 0; i < numLEDS * 13 ; i++)
-      {
-        colors[i] = rgb_color(0, 0, maxBrightness);
-      }
 }
